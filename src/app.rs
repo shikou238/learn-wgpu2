@@ -6,15 +6,18 @@ use std::sync::Arc;
 use winit::{
     application::ApplicationHandler, event::*, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, window::Window
 };
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
 
 pub struct App {
     #[cfg(target_arch = "wasm32")]
-    proxy: Option<winit::event_loop::EventLoopProxy<State>>,
+    proxy: Option<winit::event_loop::EventLoopProxy<AppView>>,
     state: Option<AppView>,
 }
 
 impl App {
-    pub fn new(#[cfg(target_arch = "wasm32")] event_loop: &EventLoop<State>) -> Self {
+    pub fn new(#[cfg(target_arch = "wasm32")] event_loop: &EventLoop<AppView>) -> Self {
         #[cfg(target_arch = "wasm32")]
         let proxy = Some(event_loop.create_proxy());
         Self {
@@ -38,9 +41,9 @@ impl ApplicationHandler<AppView> for App {
             
             const CANVAS_ID: &str = "canvas";
 
-            let window = wgpu::web_sys::window().unwrap_throw();
-            let document = window.document().unwrap_throw();
-            let canvas = document.get_element_by_id(CANVAS_ID).unwrap_throw();
+            let window = wgpu::web_sys::window().unwrap();
+            let document = window.document().unwrap();
+            let canvas = document.get_element_by_id(CANVAS_ID).unwrap();
             let html_canvas_element = canvas.unchecked_into();
             window_attributes = window_attributes.with_canvas(Some(html_canvas_element));
         }
@@ -65,7 +68,7 @@ impl ApplicationHandler<AppView> for App {
                 wasm_bindgen_futures::spawn_local(async move {
                     assert!(proxy
                         .send_event(
-                            State::new(window)
+                            AppView::new(vec![window])
                                 .await
                                 .expect("Unable to create canvas!!!")
                         )
@@ -80,10 +83,14 @@ impl ApplicationHandler<AppView> for App {
         // This is where proxy.send_event() ends up
         #[cfg(target_arch = "wasm32")]
         {
-            event.window.request_redraw();
-            event.resize(
-                event.window.inner_size().width,
-                event.window.inner_size().height,
+            use winit::window;
+
+            let mut window = &mut event.windows[0];
+            window.nature.request_redraw();
+            window.resize(
+                window.nature.inner_size().width,
+                window.nature.inner_size().height,
+                &event.device
             );
         }
         self.state = Some(event);
@@ -107,7 +114,7 @@ impl ApplicationHandler<AppView> for App {
                 None => return,
             }
         };
-        let (device, queue) = (&_canvas.device, &_canvas.queue);
+        let (device, queue,render_pipeline) = (&_canvas.device, &_canvas.queue, &_canvas.render_pipeline);
         match event {
             WindowEvent::CloseRequested => {
                 if _canvas.close(window_id){
@@ -117,7 +124,7 @@ impl ApplicationHandler<AppView> for App {
             },
             WindowEvent::Resized(size) => window_wrapper.resize(size.width, size.height, device),
             WindowEvent::RedrawRequested => {
-                window_wrapper.render(device, queue);
+                window_wrapper.render(device, queue, render_pipeline);
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -129,11 +136,12 @@ impl ApplicationHandler<AppView> for App {
                 ..
             } => match (code, key_state.is_pressed()) {
                 (KeyCode::Escape, true) => event_loop.exit(),
+                (KeyCode::KeyR, true) => {_canvas.reconstruct_render_pipeline();},
                 _ => {}
             },
             WindowEvent::RedrawRequested => {
                 window_wrapper.update();
-                match window_wrapper.render(device, queue) {
+                match window_wrapper.render(device, queue, render_pipeline) {
                     Ok(_) => {}
                     // Reconfigure the surface if it's lost or outdated
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {

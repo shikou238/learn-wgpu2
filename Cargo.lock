@@ -748,6 +748,7 @@ dependencies = [
  "env_logger",
  "log",
  "pollster",
+ "wasm-bindgen-futures",
  "web-sys",
  "wgpu",
  "winit",

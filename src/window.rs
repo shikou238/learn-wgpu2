@@ -17,19 +17,13 @@ pub struct WindowWrapper{
 }
 
 impl WindowWrapper {
-    pub fn new(window: Arc<Window>, instance: &wgpu::Instance, adapter: &wgpu::Adapter) -> Self {
+    pub fn new(window: Arc<Window>, instance: &wgpu::Instance, adapter: &wgpu::Adapter,surface_format: wgpu::TextureFormat) -> Self {
         let size = window.inner_size();
 
         let surface = instance.create_surface(window.clone()).unwrap();
 
         let surface_caps = surface.get_capabilities(&adapter);
-        // Shader code in this tutorial assumes an sRGB surface texture. Using a different
-        // one will result in all the colors coming out darker. If you want to support non
-        // sRGB surfaces, you'll need to account for that when drawing to the frame.
-        let surface_format = surface_caps.formats.iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
+        
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
@@ -73,7 +67,7 @@ impl WindowWrapper {
         self.last_cursor_position = Some(position);        
     }
     
-    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<(), wgpu::SurfaceError>{
+    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, render_pipeline: &wgpu::RenderPipeline) -> Result<(), wgpu::SurfaceError>{
         self.nature.request_redraw();
 
         // We can't render unless the surface is configured
@@ -91,7 +85,7 @@ impl WindowWrapper {
         });
 
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -113,6 +107,8 @@ impl WindowWrapper {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
+            render_pass.set_pipeline(render_pipeline); // 2.
+            render_pass.draw(0..3, 0..1); // 3.
         }
 
         // submit will accept anything that implements IntoIter

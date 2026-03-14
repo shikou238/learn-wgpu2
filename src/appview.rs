@@ -11,6 +11,7 @@ use winit::{
 pub struct AppView {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    pub render_pipeline: wgpu::RenderPipeline,
     pub windows: Vec<WindowWrapper>,
 }
 
@@ -43,6 +44,15 @@ impl AppView {
             })
             .await?;
 
+        let surface_caps = surface.get_capabilities(&adapter);
+        // Shader code in this tutorial assumes an sRGB surface texture. Using a different
+        // one will result in all the colors coming out darker. If you want to support non
+        // sRGB surfaces, you'll need to account for that when drawing to the frame.
+        let surface_format = surface_caps.formats.iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+
          let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
@@ -59,14 +69,93 @@ impl AppView {
                 trace: wgpu::Trace::Off,
             })
             .await?;
+
         
-        let window_wrappers = windows.into_iter().map(|window| WindowWrapper::new(window, &instance, &adapter)).collect();
+
+        let render_pipeline = match Self::constuct_render_pipeline(&device, surface_format){
+            Ok(pipeline) => pipeline,
+            Err(e) => {
+                log::error!("Failed to construct render pipeline: {:?}", e);
+                return Err(e);
+            }
+        };
+        
+        let window_wrappers = windows.into_iter().map(|window| WindowWrapper::new(window, &instance, &adapter, surface_format)).collect();
         
         Ok(Self {
             device,
             queue,
+            render_pipeline,
             windows: window_wrappers,
         })
+    }
+    pub fn reconstruct_render_pipeline(&mut self) -> anyhow::Result<()> {
+        log::debug!("Reconstructing render pipeline...--------------------------------------------------------------");
+        let surface_format = self.windows[0].config.format;
+        self.render_pipeline = match Self::constuct_render_pipeline(&self.device, surface_format){
+            Ok(pipeline) => pipeline,
+            Err(e) => {
+                log::error!("Failed to reconstruct render pipeline: {:?}", e);
+                return Err(e);
+            }
+        };
+        log::debug!("Render pipeline reconstructed successfully.");
+        Ok(())
+    }
+    fn constuct_render_pipeline(device: &wgpu::Device,surface_format: wgpu::TextureFormat) -> anyhow::Result<wgpu::RenderPipeline> {
+        let s = std::fs::read_to_string("src/shader.wgsl")?;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shader"),
+            source: wgpu::ShaderSource::Wgsl(s.into()),
+        });
+        //let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[],
+                immediate_size: 0,
+            });
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"), // 1.
+                buffers: &[], // 2.
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState { // 3.
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState { // 4.
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+             primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList, // 1.
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw, // 2.
+                cull_mode: Some(wgpu::Face::Back),
+                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                polygon_mode: wgpu::PolygonMode::Fill,
+                // Requires Features::DEPTH_CLIP_CONTROL
+                unclipped_depth: false,
+                // Requires Features::CONSERVATIVE_RASTERIZATION
+                conservative: false,
+            },
+             depth_stencil: None, // 1.
+            multisample: wgpu::MultisampleState {
+                count: 1, // 2.
+                mask: !0, // 3.
+                alpha_to_coverage_enabled: false, // 4.
+            },
+            multiview_mask: None, // 5.
+            cache: None, // 6.compile result
+        });
+        Ok(render_pipeline)
     }
 
     pub fn close(&mut self, window_id: winit::window::WindowId) -> bool{
