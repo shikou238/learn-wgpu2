@@ -1,6 +1,11 @@
 mod app;
 mod appview;
 mod window;
+mod vertex;
+mod texture;
+mod shader;
+mod camera;
+
 
 use std::sync::Arc;
 

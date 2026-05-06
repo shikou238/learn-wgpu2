@@ -1,17 +1,23 @@
-use crate::window::WindowWrapper;
+use crate::{shader::ShaderWrapper, texture, vertex::Vertex, window::WindowWrapper};
 
 use std::sync::Arc;
+use crate::camera;
 
 use winit::{
      event_loop::ActiveEventLoop, keyboard::KeyCode, window::{self, Window}
 };
+use wgpu::util::DeviceExt;
 
 
+use crate::vertex;
 // This will store the state of our game
 pub struct AppView {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub render_pipeline: wgpu::RenderPipeline,
+    pub model_buffer: vertex::ModelBuffer,
+    pub shader: ShaderWrapper,
+    pub diffuse_bind_group: wgpu::BindGroup,
     pub windows: Vec<WindowWrapper>,
 }
 
@@ -70,29 +76,59 @@ impl AppView {
             })
             .await?;
 
-        
+        let shader = ShaderWrapper::new( &device)?;
 
-        let render_pipeline = match Self::constuct_render_pipeline(&device, surface_format){
+        let render_pipeline = match Self::constuct_render_pipeline(&device, &shader, surface_format){
             Ok(pipeline) => pipeline,
             Err(e) => {
                 log::error!("Failed to construct render pipeline: {:?}", e);
                 return Err(e);
             }
         };
+        // let model = vertex::pentagon();
+        // let model_buffer = model.create_buffer(&device);
         
-        let window_wrappers = windows.into_iter().map(|window| WindowWrapper::new(window, &instance, &adapter, surface_format)).collect();
+        //temporary code to save model data to json file
+        //model.save_sexpr_file("pentagon.json").expect("Failed to save model to file");
+
+        let model_buffer = Self::load_model_and_create_buffer(&device)?;
+
+        let diffuse_texture = texture::TextureWrapper::new("happy-tree.png", &device, &queue);
+
+        let diffuse_bind_group = device.create_bind_group(
+            &wgpu::BindGroupDescriptor {
+                layout: &shader.get_texture_bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
+                    }
+                ],
+                label: Some("diffuse_bind_group"),
+            }
+        );
+
+        
+        let window_wrappers = windows.into_iter().map(|window| WindowWrapper::new(window, &instance, &device,&adapter, surface_format)).collect();
         
         Ok(Self {
             device,
             queue,
             render_pipeline,
+            model_buffer,
+            shader,
+            diffuse_bind_group,
             windows: window_wrappers,
         })
     }
-    pub fn reconstruct_render_pipeline(&mut self) -> anyhow::Result<()> {
+    fn reconstruct_render_pipeline(&mut self) -> anyhow::Result<()> {
         log::debug!("Reconstructing render pipeline...--------------------------------------------------------------");
         let surface_format = self.windows[0].config.format;
-        self.render_pipeline = match Self::constuct_render_pipeline(&self.device, surface_format){
+        self.render_pipeline = match Self::constuct_render_pipeline(&self.device, &self.shader, surface_format){
             Ok(pipeline) => pipeline,
             Err(e) => {
                 log::error!("Failed to reconstruct render pipeline: {:?}", e);
@@ -102,30 +138,25 @@ impl AppView {
         log::debug!("Render pipeline reconstructed successfully.");
         Ok(())
     }
-    fn constuct_render_pipeline(device: &wgpu::Device,surface_format: wgpu::TextureFormat) -> anyhow::Result<wgpu::RenderPipeline> {
-        let s = std::fs::read_to_string("src/shader.wgsl")?;
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(s.into()),
-        });
-        //let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+    fn constuct_render_pipeline(device: &wgpu::Device,shader_wrapper: &ShaderWrapper,surface_format: wgpu::TextureFormat) -> anyhow::Result<wgpu::RenderPipeline> {
+        
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &shader_wrapper.bind_group_layouts.iter().collect::<Vec<_>>(),
                 immediate_size: 0,
             });
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &shader_wrapper.nature,
                 entry_point: Some("vs_main"), // 1.
-                buffers: &[], // 2.
+                buffers: &[Vertex::LAYOUT], // 2.
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState { // 3.
-                module: &shader,
+                module: &shader_wrapper.nature,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState { // 4.
                     format: surface_format,
@@ -157,7 +188,33 @@ impl AppView {
         });
         Ok(render_pipeline)
     }
-
+    fn load_model_and_create_buffer(device: &wgpu::Device) -> anyhow::Result<vertex::ModelBuffer> {
+        let model = vertex::Model::load_sexpr_file("pentagon.json")?;
+        Ok(model.create_buffer(device))
+    }
+    fn reload_model(&mut self) -> anyhow::Result<()> {
+        match Self::load_model_and_create_buffer(&self.device){
+            Ok(model_buffer) => {
+                self.model_buffer = model_buffer;
+                Ok(())
+            },
+            Err(e) => Err(e)
+        }
+    }
+    fn report_err(anyhow_err: anyhow::Result<()>, report : fn(&anyhow::Error)) {
+        match anyhow_err {
+            Ok(_) => {},
+            Err(e) => {
+                report(&e);
+            }
+        }
+    }
+    
+    pub fn reload(&mut self){
+        Self::report_err(self.shader.reload(&self.device), {|e| log::error!("Failed to reload shader: {:?}", e)});
+        Self::report_err(self.reconstruct_render_pipeline(), {|e| log::error!("Failed to reload render pipeline: {:?}", e)});
+        Self::report_err(self.reload_model(), {|e| log::error!("Failed to reload model: {:?}", e)});
+    }
     pub fn close(&mut self, window_id: winit::window::WindowId) -> bool{
         self.windows.retain(|w| w.nature.id() != window_id);
         self.windows.is_empty()

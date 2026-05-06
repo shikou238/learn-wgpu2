@@ -6,7 +6,10 @@ use winit::{
 };
 
 use crate::hsv_to_rgb;
+use crate::vertex;
+use crate::camera;
 
+use wgpu::util::DeviceExt;
 pub struct WindowWrapper{
     pub nature: Arc<Window>,
     // todo why lifetime is needed here?
@@ -14,10 +17,12 @@ pub struct WindowWrapper{
     pub config: wgpu::SurfaceConfiguration,
     pub is_surface_configured: bool,
     pub last_cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
+    pub camera: camera::Camera,
+    pub camera_bind_group: wgpu::BindGroup,
 }
 
 impl WindowWrapper {
-    pub fn new(window: Arc<Window>, instance: &wgpu::Instance, adapter: &wgpu::Adapter,surface_format: wgpu::TextureFormat) -> Self {
+    pub fn new(window: Arc<Window>, instance: &wgpu::Instance,device: &wgpu::Device, adapter: &wgpu::Adapter,surface_format: wgpu::TextureFormat) -> Self {
         let size = window.inner_size();
 
         let surface = instance.create_surface(window.clone()).unwrap();
@@ -34,6 +39,60 @@ impl WindowWrapper {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
+        let camera = camera::Camera {
+            // position the camera 1 unit up and 2 units back
+            // +z is out of the screen
+            eye: (0.0, 1.0, 2.0).into(),
+            // have it look at the origin
+            target: (0.0, 0.0, 0.0).into(),
+            // which way is "up"
+            up: cgmath::Vector3::unit_y(),
+            aspect: size.width as f32 / size.height as f32,
+            fovy: 45.0,
+            znear: 0.1,
+            zfar: 100.0,
+        };
+
+        // in new() after creating `camera`
+
+        let mut camera_uniform = camera::CameraUniform::new();
+        camera_uniform.update_view_proj(&camera);
+
+        let camera_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Camera Buffer"),
+                contents: bytemuck::cast_slice(&[camera_uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            }
+        );
+        //todo このコードってカメラに書かれるべき？それともシェーダーに書かれるべき？
+        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }
+            ],
+            label: Some("camera_bind_group_layout"),
+        });
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,  
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                }
+            ],
+            label: Some("camera_bind_group"),
+        });
+
 
         Self {
             nature: window,
@@ -41,6 +100,8 @@ impl WindowWrapper {
             config,
             is_surface_configured: false,
             last_cursor_position: None,
+            camera,
+            camera_bind_group,
         }
     }
     pub fn resize(&mut self, _width: u32, _height: u32,device: &wgpu::Device) {
@@ -67,7 +128,7 @@ impl WindowWrapper {
         self.last_cursor_position = Some(position);        
     }
     
-    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, render_pipeline: &wgpu::RenderPipeline) -> Result<(), wgpu::SurfaceError>{
+    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, render_pipeline: &wgpu::RenderPipeline, model_buffer: &vertex::ModelBuffer, diffuse_bind_group: &wgpu::BindGroup) -> Result<(), wgpu::SurfaceError>{
         self.nature.request_redraw();
 
         // We can't render unless the surface is configured
@@ -108,7 +169,11 @@ impl WindowWrapper {
                 multiview_mask: None,
             });
             render_pass.set_pipeline(render_pipeline); // 2.
-            render_pass.draw(0..3, 0..1); // 3.
+            render_pass.set_bind_group(0, diffuse_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, model_buffer.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(model_buffer.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..model_buffer.num_indices,0, 0..1); // 3.
         }
 
         // submit will accept anything that implements IntoIter
@@ -116,5 +181,80 @@ impl WindowWrapper {
         output.present();
 
         Ok(())
+    }
+}
+
+
+struct CameraController {
+    speed: f32,
+    is_forward_pressed: bool,
+    is_backward_pressed: bool,
+    is_left_pressed: bool,
+    is_right_pressed: bool,
+}
+
+impl CameraController {
+    fn new(speed: f32) -> Self {
+        Self {
+            speed,
+            is_forward_pressed: false,
+            is_backward_pressed: false,
+            is_left_pressed: false,
+            is_right_pressed: false,
+        }
+    }
+
+    fn handle_key(&mut self, code: KeyCode, is_pressed: bool) -> bool {
+        match code {
+            KeyCode::KeyW | KeyCode::ArrowUp => {
+                self.is_forward_pressed = is_pressed;
+                true
+            }
+            KeyCode::KeyA | KeyCode::ArrowLeft => {
+                self.is_left_pressed = is_pressed;
+                true
+            }
+            KeyCode::KeyS | KeyCode::ArrowDown => {
+                self.is_backward_pressed = is_pressed;
+                true
+            }
+            KeyCode::KeyD | KeyCode::ArrowRight => {
+                self.is_right_pressed = is_pressed;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn update_camera(&self, camera: &mut camera::Camera) {
+        use cgmath::InnerSpace;
+        let forward = camera.target - camera.eye;
+        let forward_norm = forward.normalize();
+        let forward_mag = forward.magnitude();
+
+        // Prevents glitching when the camera gets too close to the
+        // center of the scene.
+        if self.is_forward_pressed && forward_mag > self.speed {
+            camera.eye += forward_norm * self.speed;
+        }
+        if self.is_backward_pressed {
+            camera.eye -= forward_norm * self.speed;
+        }
+
+        let right = forward_norm.cross(camera.up);
+
+        // Redo radius calc in case the forward/backward is pressed.
+        let forward = camera.target - camera.eye;
+        let forward_mag = forward.magnitude();
+
+        if self.is_right_pressed {
+            // Rescale the distance between the target and the eye so 
+            // that it doesn't change. The eye, therefore, still 
+            // lies on the circle made by the target and eye.
+            camera.eye = camera.target - (forward + right * self.speed).normalize() * forward_mag;
+        }
+        if self.is_left_pressed {
+            camera.eye = camera.target - (forward - right * self.speed).normalize() * forward_mag;
+        }
     }
 }

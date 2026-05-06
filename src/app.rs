@@ -124,7 +124,7 @@ impl ApplicationHandler<AppView> for App {
             },
             WindowEvent::Resized(size) => window_wrapper.resize(size.width, size.height, device),
             WindowEvent::RedrawRequested => {
-                window_wrapper.render(device, queue, render_pipeline);
+                window_wrapper.render(device, queue, render_pipeline, &_canvas.model_buffer, &_canvas.diffuse_bind_group).unwrap();
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -136,12 +136,12 @@ impl ApplicationHandler<AppView> for App {
                 ..
             } => match (code, key_state.is_pressed()) {
                 (KeyCode::Escape, true) => event_loop.exit(),
-                (KeyCode::KeyR, true) => {_canvas.reconstruct_render_pipeline();},
+                (KeyCode::KeyR, true) => {_canvas.reload();},
                 _ => {}
             },
             WindowEvent::RedrawRequested => {
                 window_wrapper.update();
-                match window_wrapper.render(device, queue, render_pipeline) {
+                match window_wrapper.render(device, queue, render_pipeline, &_canvas.model_buffer, &_canvas.diffuse_bind_group) {
                     Ok(_) => {}
                     // Reconfigure the surface if it's lost or outdated
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
